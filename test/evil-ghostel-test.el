@@ -81,6 +81,74 @@ Uses mocks for native functions."
            ,@body)
        (delete-process ghostel--process))))
 
+(defmacro evil-ghostel-test--with-input-fixture (prompt input &rest body)
+  "Set up a mock terminal buffer containing PROMPT followed by INPUT.
+PROMPT carries `ghostel-prompt'.  The mocked terminal cursor starts at
+the end of INPUT.  Run BODY with Evil and `evil-ghostel-mode' enabled."
+  (declare (indent 2) (debug t))
+  `(let ((buf (generate-new-buffer " *evil-ghostel-test-input*"))
+         (proc (evil-ghostel-test--live-process)))
+     (unwind-protect
+         (with-current-buffer buf
+           (ghostel-mode)
+           (let ((inhibit-read-only t))
+             (insert (propertize ,prompt 'ghostel-prompt t))
+             (insert ,input))
+           (setq ghostel--term 'fake
+                 ghostel--term-rows 1
+                 ghostel--process proc
+                 ghostel--cursor-char-pos (point)
+                 ghostel--cursor-pos (cons (current-column) 0))
+           (evil-local-mode 1)
+           (evil-ghostel-mode 1)
+           (cl-letf (((symbol-function 'ghostel--alt-screen-p)
+                      (lambda (&rest _) nil)))
+             ,@body))
+       (delete-process proc)
+       (kill-buffer buf))))
+
+(defun evil-ghostel-test--echo-key (key)
+  "Update the mocked renderer cursor after sending KEY."
+  (pcase key
+    ((or "left" "backspace")
+     (setq ghostel--cursor-pos
+           (cons (max 0 (1- (car ghostel--cursor-pos)))
+                 (cdr ghostel--cursor-pos)))
+     (when ghostel--cursor-char-pos
+       (cl-decf ghostel--cursor-char-pos)
+       ;; Soft-wrap newlines are renderer artifacts, not terminal cells.
+       (when (get-text-property ghostel--cursor-char-pos 'ghostel-wrap)
+         (cl-decf ghostel--cursor-char-pos))))
+    ("right"
+     (setq ghostel--cursor-pos
+           (cons (1+ (car ghostel--cursor-pos))
+                 (cdr ghostel--cursor-pos)))
+     (when ghostel--cursor-char-pos
+       (cl-incf ghostel--cursor-char-pos)))
+    ((or "up" "down")
+     (let* ((delta (if (equal key "up") -1 1))
+            (row (max 0 (+ (cdr ghostel--cursor-pos) delta)))
+            (col (car ghostel--cursor-pos)))
+       (setq ghostel--cursor-pos (cons col row))
+       (when ghostel--cursor-char-pos
+         (setq ghostel--cursor-char-pos
+               (save-excursion
+                 (goto-char (or (ghostel--viewport-start) (point-min)))
+                 (forward-line row)
+                 ;; A real render pads a short cursor row to COL.  The mock
+                 ;; buffer is static, so use the equivalent numeric position.
+                 (+ (line-beginning-position) col))))))))
+
+(defmacro evil-ghostel-test--with-echo-send (keys-sent &rest body)
+  "Record sent key names in KEYS-SENT and echo them while running BODY."
+  (declare (indent 1) (debug t))
+  `(cl-letf (((symbol-function 'ghostel--send-encoded)
+              (lambda (key _mods &rest _)
+                (push key ,keys-sent)
+                (evil-ghostel-test--echo-key key)))
+             ((symbol-function 'evil-ghostel--drain-output) #'ignore))
+     ,@body))
+
 ;; -----------------------------------------------------------------------
 ;; Test: mode activation
 ;; -----------------------------------------------------------------------
@@ -101,6 +169,10 @@ literal key."
                  evil-insert-state-entry-hook))
    (should (memq 'evil-ghostel--anchor-inhibit
                  ghostel-inhibit-anchor-functions))
+   (should (eq (syntax-table) evil-ghostel-syntax-table))
+   (should (eq (char-syntax ?_) ?w))
+   (should-not (eq (char-syntax ?/) ?w))
+   (should-not (eq (char-syntax ?.) ?w))
    (should (advice--p (advice--symbol-function 'ghostel--redraw)))
    (should (advice--p (advice--symbol-function 'ghostel--apply-cursor-style)))
    ;; Editing operators are bound via [remap evil-FOO] in normal state.
@@ -137,6 +209,7 @@ overwrite the position evil assigns at operator/visual completion."
   (evil-ghostel-test--with-evil-buffer
    (evil-ghostel-mode -1)
    (should-not evil-ghostel-mode)
+   (should (eq (syntax-table) ghostel-mode-syntax-table))
    (should-not (memq 'evil-ghostel--insert-state-entry
                      evil-insert-state-entry-hook))))
 
@@ -649,9 +722,7 @@ algorithm; this one walks scrollback math and viewport offsets too)."
   (evil-ghostel-test--with-buffer 5 40 "$ echo hello world"
                                   (should (equal '(18 . 0) ghostel--cursor-pos))
                                   (let ((keys-sent '()))
-                                    (cl-letf (((symbol-function 'ghostel--send-encoded)
-                                               (lambda (key _mods &rest _)
-                                                 (push key keys-sent))))
+                                    (evil-ghostel-test--with-echo-send keys-sent
                                       ;; Target: position 8 = column 7
                                       ;; (start of "hello").
                                       (evil-ghostel-goto-input-position 8))
@@ -692,9 +763,7 @@ diffing — otherwise dy is wrong by the scrollback line count."
                            (move-to-column (car tpos))
                            (point))))
         (let ((keys-sent '()))
-          (cl-letf (((symbol-function 'ghostel--send-encoded)
-                     (lambda (key _mods &rest _)
-                       (push key keys-sent))))
+          (evil-ghostel-test--with-echo-send keys-sent
             (evil-ghostel-goto-input-position target-pos))
           (should (= 1 (length keys-sent)))
           (should (equal "up" (car keys-sent))))))))
@@ -968,20 +1037,16 @@ was exposing."
   (evil-ghostel-test--with-input-fixture "$ " "hello"
     (evil-normal-state)
     (let ((keys-sent '()))
-      (cl-letf (((symbol-function 'ghostel--send-encoded)
-                 (lambda (key mods &rest _)
-                   (push (cons key mods) keys-sent)))
-                ((symbol-function 'evil-ghostel--sync-render) #'ignore)
-                ;; Mock the entry hook to avoid double-counting arrows: in
-                ;; tests `sync-render' is a no-op so `ghostel--cursor-pos'
-                ;; doesn't track the move, and the hook's idempotent re-run
-                ;; would otherwise re-send the same arrows.
-                ((symbol-function 'evil-ghostel--insert-state-entry) #'ignore))
-        (evil-ghostel-insert-line))
+      ;; Mock the entry hook to avoid double-counting arrows: the echo
+      ;; mock updates cursor-pos per key, and the hook's idempotent
+      ;; re-run would otherwise re-send the same arrows.
+      (cl-letf (((symbol-function 'evil-ghostel--insert-state-entry) #'ignore))
+        (evil-ghostel-test--with-echo-send keys-sent
+          (evil-ghostel-insert-line)))
       ;; Cursor at col 7 (end of "hello"), input-start at col 2 → 5 lefts.
-      (should (= 5 (cl-count '("left" . "") keys-sent :test #'equal)))
+      (should (= 5 (cl-count "left" keys-sent :test #'equal)))
       ;; Critically: no readline C-a — Bug B (#264) determinism.
-      (should-not (cl-find '("a" . "ctrl") keys-sent :test #'equal))
+      (should-not (member "a" keys-sent))
       (should (evil-insert-state-p)))))
 
 (ert-deftest evil-ghostel-test-append-line-sends-arrows-to-row-end ()
@@ -995,7 +1060,6 @@ regardless of shell vi-mode."
       (cl-letf (((symbol-function 'ghostel--send-encoded)
                  (lambda (key mods &rest _)
                    (push (cons key mods) keys-sent)))
-                ((symbol-function 'evil-ghostel--sync-render) #'ignore)
                 ((symbol-function 'evil-ghostel--insert-state-entry) #'ignore))
         (evil-ghostel-append-line))
       ;; Cursor at col 7, row-end at col 7 (after "hello", no padding) →
@@ -1010,10 +1074,10 @@ After the vterm-style rewrite point is set deterministically before
 right prompt (Bug A's \"until first keystroke\" symptom)."
   (evil-ghostel-test--with-input-fixture "$ " "hello"
     (evil-normal-state)
-    (cl-letf (((symbol-function 'ghostel--send-encoded) #'ignore)
-              ((symbol-function 'evil-ghostel--sync-render) #'ignore)
-              ((symbol-function 'evil-ghostel--insert-state-entry) #'ignore))
-      (evil-ghostel-insert-line))
+    (let ((keys-sent '()))
+      (cl-letf (((symbol-function 'evil-ghostel--insert-state-entry) #'ignore))
+        (evil-ghostel-test--with-echo-send keys-sent
+          (evil-ghostel-insert-line))))
     (should (= 3 (point))) ; right after "$ "
     (should (evil-insert-state-p))))
 
@@ -1023,7 +1087,6 @@ right prompt (Bug A's \"until first keystroke\" symptom)."
     (evil-normal-state)
     (goto-char (point-min))
     (cl-letf (((symbol-function 'ghostel--send-encoded) #'ignore)
-              ((symbol-function 'evil-ghostel--sync-render) #'ignore)
               ((symbol-function 'evil-ghostel--insert-state-entry) #'ignore))
       (evil-ghostel-append-line))
     (should (= 8 (point))) ; end of "hello"
@@ -1092,9 +1155,7 @@ arrows are sent."
   (evil-ghostel-test--with-buffer 5 40 "$ echo hello"
                                   ;; Delete "hello" (col 7-12)
                                   (let ((keys-sent '()))
-                                    (cl-letf (((symbol-function 'ghostel--send-encoded)
-                                               (lambda (key _mods &rest _)
-                                                 (push key keys-sent))))
+                                    (evil-ghostel-test--with-echo-send keys-sent
                                       (evil-ghostel-delete-input-region 8 13))
                                     ;; Should send arrow keys to move cursor, then 5 backspaces
                                     (should (= 5 (cl-count "backspace" keys-sent :test #'equal))))))
@@ -1103,47 +1164,14 @@ arrows are sent."
 ;; Test: input-region helpers (input-end, clamp)
 ;; -----------------------------------------------------------------------
 
-(defmacro evil-ghostel-test--with-input-fixture (prompt input &rest body)
-  "Set up a mock terminal buffer with PROMPT (carrying `ghostel-prompt')
-followed by INPUT, with `ghostel--cursor-char-pos' positioned at the
-end of INPUT.  Runs BODY in the buffer.
-
-Evil and `evil-ghostel-mode' are enabled so tests can invoke evil
-commands.  Mocks the terminal handle and viewport so the
-input-region helpers can derive prompt boundaries and viewport rows
-without a real native module."
-  (declare (indent 2))
-  `(let ((buf (generate-new-buffer " *evil-ghostel-test-input*"))
-         (proc (evil-ghostel-test--live-process)))
-     (unwind-protect
-         (with-current-buffer buf
-           (ghostel-mode)
-           (let ((inhibit-read-only t))
-             (insert (propertize ,prompt 'ghostel-prompt t))
-             (insert ,input))
-           (setq ghostel--term 'fake)
-           (setq ghostel--term-rows 1)
-           (setq ghostel--process proc)
-           (setq ghostel--cursor-char-pos (point))
-           (setq ghostel--cursor-pos (cons (current-column) 0))
-           (evil-local-mode 1)
-           (evil-ghostel-mode 1)
-           (cl-letf (((symbol-function 'ghostel--alt-screen-p)
-                      (lambda (&rest _) nil)))
-             ,@body))
-       (delete-process proc)
-       (kill-buffer buf))))
-
 (ert-deftest evil-ghostel-test-goto-input-position-sends-arrows-unit ()
   "Unit: |dx| left arrows are sent when point is left of the cursor."
   (evil-ghostel-test--with-input-fixture "$ " "hello world"
     ;; cursor-pos col 13 (after "$ hello world"); target is col 7 (start
     ;; of "hello"), so 6 LEFT arrows.
     (let ((keys-sent '()))
-      (cl-letf (((symbol-function 'ghostel--send-encoded)
-                 (lambda (key _mods &rest _)
-                   (push key keys-sent))))
-        (evil-ghostel-goto-input-position 8)) ; pos 8 = column 7
+      (evil-ghostel-test--with-echo-send keys-sent
+        (evil-ghostel-goto-input-position 8))           ; pos 8 = column 7
       (should (= 6 (length keys-sent)))
       (should (cl-every (lambda (k) (equal k "left")) keys-sent)))))
 
@@ -1156,6 +1184,32 @@ without a real native module."
                    (push key keys-sent))))
         (evil-ghostel-goto-input-position ghostel--cursor-char-pos))
       (should (zerop (length keys-sent))))))
+
+(ert-deftest evil-ghostel-test-goto-input-position-stops-on-no-op ()
+  "A swallowed arrow stops the drive without moving point to the target."
+  (evil-ghostel-test--with-input-fixture "$ " "abc"
+    (let ((keys-sent '()))
+      (cl-letf (((symbol-function 'ghostel--send-encoded)
+                 (lambda (key _mods &rest _) (push key keys-sent)))
+                ((symbol-function 'evil-ghostel--drain-output) #'ignore))
+        (should-not (evil-ghostel-goto-input-position 3)))
+      (should (equal '("left") keys-sent))
+      (should (= (point) ghostel--cursor-char-pos)))))
+
+(ert-deftest evil-ghostel-test-goto-input-position-stops-after-vertical-no-op ()
+  "A swallowed vertical arrow must not trigger horizontal keys on the wrong row."
+  (evil-ghostel-test--with-evil-buffer
+   (setq-local ghostel--term t)
+   (insert "one\ntwo")
+   (let ((ghostel--cursor-pos '(3 . 1))
+         (ghostel--cursor-char-pos (point-max))
+         (keys-sent nil))
+     (cl-letf (((symbol-function 'ghostel--send-encoded)
+                (lambda (key _mods &rest _) (push key keys-sent)))
+               ((symbol-function 'evil-ghostel--drain-output) #'ignore))
+       (should-not (evil-ghostel-goto-input-position (point-min))))
+     (should (equal '("up") keys-sent))
+     (should (= (point) ghostel--cursor-char-pos)))))
 
 (defmacro evil-ghostel-test--with-cursor-fixture (prompt typed trail &rest body)
   "Mock terminal: PROMPT (`ghostel-prompt') + TYPED (`ghostel-input') + TRAIL,
@@ -1198,7 +1252,6 @@ correction is emitted (issue #493)."
     (let ((sent '()))
       (cl-letf (((symbol-function 'ghostel--send-encoded)
                  (lambda (key mods &rest _) (push (cons key mods) sent)))
-                ((symbol-function 'evil-ghostel--sync-render) #'ignore)
                 ;; Suggestion trails the cursor -> the input end is the cursor.
                 ((symbol-function 'evil-ghostel--input-end)
                  (lambda () ghostel--cursor-char-pos)))
@@ -1215,100 +1268,46 @@ correction is emitted (issue #493)."
 suggestion clamp does not over-restrict (issue #493)."
   (evil-ghostel-test--with-cursor-fixture "$ " "hel" "lo"
     (let ((sent '()))
-      (cl-letf (((symbol-function 'ghostel--send-encoded)
-                 (lambda (key mods &rest _) (push (cons key mods) sent)))
-                ((symbol-function 'evil-ghostel--sync-render) #'ignore)
-                ;; Real input end is two cells right of the cursor.
-                ((symbol-function 'evil-ghostel--input-end)
-                 (lambda () (+ ghostel--cursor-char-pos 2))))
-        (evil-ghostel-goto-input-position (+ ghostel--cursor-char-pos 2)))
-      (should (= 2 (cl-count "right" sent :key #'car :test #'equal)))
-      (should-not (cl-find '("_" . "ctrl") sent :test #'equal))
-      (should-not (cl-find "backspace" sent :key #'car :test #'equal)))))
-
-(ert-deftest evil-ghostel-test-sync-render-forces-deferred-redraw ()
-  "`sync-render' force-runs `ghostel--redraw-now' after a bulk-output drain.
-The filter only takes the synchronous redraw path for small echoes
-arriving within `ghostel-immediate-redraw-interval' of the last
-keystroke.  Larger echoes (e.g. `cc' sending 100 backspaces) take
-the bulk-output branch, which queues a timer-driven redraw — so
-`ghostel--cursor-pos' / `ghostel--cursor-char-pos' are stale until
-the timer fires.  `sync-render' must close the gap by forcing the
-deferred redraw before returning, otherwise the next operator
-(e.g. `i' after `cc') reads stale cursor state and computes a
-wrong arrow delta."
-  (evil-ghostel-test--with-input-fixture "$ " "hello"
-    (let* ((redraw-calls 0)
-           ;; Pretend the filter deferred a redraw to its timer.
-           (fake-timer (run-with-timer 999 nil #'ignore))
-           (ghostel--redraw-timer fake-timer)
-           (ghostel--process 'fake-proc))
-      (unwind-protect
-          (cl-letf (((symbol-function 'accept-process-output)
-                     (lambda (&rest _) nil))
-                    ;; Stubbed redraw stands in for the real
-                    ;; `ghostel--redraw-now', which cancels the timer.
-                    ((symbol-function 'ghostel--redraw-now)
-                     (lambda (_buf) (cl-incf redraw-calls))))
-            (evil-ghostel--sync-render)
-            (should (= 1 redraw-calls)))
-        (when (timerp fake-timer) (cancel-timer fake-timer))))))
-
-(ert-deftest evil-ghostel-test-sync-render-no-op-when-nothing-deferred ()
-  "`sync-render' does NOT force a redraw when the filter handled the echo.
-Small interactive echoes are drawn synchronously inside
-`ghostel--filter''s immediate-redraw branch, which clears
-`ghostel--redraw-timer'.  In that state `sync-render' must not call
-`ghostel--redraw-now' a second time — the cursor state is already
-current."
-  (evil-ghostel-test--with-input-fixture "$ " "hello"
-    (let ((redraw-calls 0)
-          (ghostel--redraw-timer nil)
-          (ghostel--process 'fake-proc))
-      (cl-letf (((symbol-function 'accept-process-output)
-                 (lambda (&rest _) nil))
-                ((symbol-function 'ghostel--redraw-now)
-                 (lambda (_buf) (cl-incf redraw-calls))))
-        (evil-ghostel--sync-render)
-        (should (zerop redraw-calls))))))
-
-(ert-deftest evil-ghostel-test-sync-render-drain-loop-respects-cap ()
-  "`sync-render' caps the drain loop at `*-max-iterations'.
-A runaway shell that returns non-nil from every
-`accept-process-output' call must not hang the caller.  The cap
-bounds total wait at ~max-iter × 50 ms."
-  (evil-ghostel-test--with-input-fixture "$ " "hello"
-    (let ((accept-calls 0)
-          (evil-ghostel-sync-render-max-iterations 5)
-          (ghostel--redraw-timer nil)
-          (ghostel--process 'fake-proc))
-      (cl-letf (((symbol-function 'accept-process-output)
-                 (lambda (&rest _) (cl-incf accept-calls) t))
-                ((symbol-function 'ghostel--redraw-now) #'ignore))
-        (evil-ghostel--sync-render)
-        ;; Loop exits via the iteration cap, not via accept returning nil.
-        (should (= 5 accept-calls))))))
+      (evil-ghostel-test--with-echo-send sent
+        (cl-letf (;; Real input end is two cells right of the cursor.
+                  ((symbol-function 'evil-ghostel--input-end)
+                   (lambda () (+ ghostel--cursor-char-pos 2))))
+          (evil-ghostel-goto-input-position (+ ghostel--cursor-char-pos 2))))
+      (should (= 2 (cl-count "right" sent :test #'equal)))
+      (should-not (member "_" sent))
+      (should-not (member "backspace" sent)))))
 
 (ert-deftest evil-ghostel-test-delete-input-region-sends-backspaces ()
   "`evil-ghostel-delete-input-region' sends one backspace per meaningful char."
   (evil-ghostel-test--with-input-fixture "$ " "hello"
     (let ((keys-sent '()))
-      (cl-letf (((symbol-function 'ghostel--send-encoded)
-                 (lambda (key _mods &rest _)
-                   (push key keys-sent))))
+      (evil-ghostel-test--with-echo-send keys-sent
         (evil-ghostel-delete-input-region 3 ghostel--cursor-char-pos))
       (should (= 5 (cl-count "backspace" keys-sent :test #'equal))))))
+
+(ert-deftest evil-ghostel-test-delete-input-region-stops-at-grapheme-boundary ()
+  "One shell backspace may remove a multi-codepoint grapheme."
+  (evil-ghostel-test--with-input-fixture "$ " "é"
+    (let ((keys-sent '())
+          (beg 3))
+      (cl-letf (((symbol-function 'ghostel--send-encoded)
+                 (lambda (key _mods &rest _)
+                   (push key keys-sent)
+                   (setq ghostel--cursor-char-pos beg)))
+                ((symbol-function 'evil-ghostel--drain-output) #'ignore))
+        (should (= 2 (evil-ghostel-delete-input-region
+                      beg ghostel--cursor-char-pos))))
+      (should (equal '("backspace") keys-sent)))))
 
 (ert-deftest evil-ghostel-test-replace-input-region-deletes-then-pastes ()
   "`evil-ghostel-replace-input-region' first deletes, then pastes new text."
   (evil-ghostel-test--with-input-fixture "$ " "abc"
     (let ((pasted nil)
           (keys-sent '()))
-      (cl-letf (((symbol-function 'ghostel--send-encoded)
-                 (lambda (key _mods &rest _) (push key keys-sent)))
-                ((symbol-function 'ghostel--paste-text)
-                 (lambda (text) (setq pasted text))))
-        (evil-ghostel-replace-input-region 3 ghostel--cursor-char-pos "XYZ"))
+      (evil-ghostel-test--with-echo-send keys-sent
+        (cl-letf (((symbol-function 'ghostel--paste-text)
+                   (lambda (text) (setq pasted text))))
+          (evil-ghostel-replace-input-region 3 ghostel--cursor-char-pos "XYZ")))
       (should (= 3 (cl-count "backspace" keys-sent :test #'equal)))
       (should (equal "XYZ" pasted)))))
 
@@ -1323,17 +1322,13 @@ bounds total wait at ~max-iter × 50 ms."
    (insert "hello world")
    (goto-char (point-min))
    (cl-letf (((symbol-function 'ghostel--alt-screen-p) (lambda (&rest _) nil))
-             (ghostel--cursor-pos '(0 . 0))
-             ((symbol-function 'evil-ghostel-goto-input-position) #'ignore))
+             (ghostel--cursor-pos '(11 . 0))
+             (ghostel--cursor-char-pos 12))  ; end of "hello world"
      (evil-normal-state)
-     (let ((bs-count 0))
-       (cl-letf (((symbol-function 'ghostel--send-encoded)
-                  (lambda (key _mods &rest _)
-                    (when (equal key "backspace")
-                      (cl-incf bs-count)))))
-         ;; Delete 5 chars (simulates dw on "hello")
+     (let ((keys-sent '()))
+       (evil-ghostel-test--with-echo-send keys-sent
          (evil-ghostel-delete 1 6 'inclusive nil nil))
-       (should (= 5 bs-count))))))
+       (should (= 5 (cl-count "backspace" keys-sent :test #'equal)))))))
 
 (ert-deftest evil-ghostel-test-delete-line-same-row-uses-backspaces ()
   "`dd' on the cursor's own line routes through `delete-input-region'.
@@ -1351,17 +1346,14 @@ shortcut is invoked."
    (cl-letf (((symbol-function 'ghostel--alt-screen-p) (lambda (&rest _) nil)))
      (evil-normal-state)
      (let ((keys-sent '()))
-       (cl-letf (((symbol-function 'ghostel--send-encoded)
-                  (lambda (key mods &rest _)
-                    (push (cons key mods) keys-sent)))
-                 ((symbol-function 'evil-ghostel--sync-render) #'ignore))
-         (evil-ghostel-delete (line-beginning-position) (line-end-position)
-                              'line nil nil))
-       ;; 5 backspaces — one per char of "hello".
-       (should (= 5 (cl-count '("backspace" . "") keys-sent :test #'equal)))
-       ;; No readline shortcuts.
-       (should-not (cl-find '("e" . "ctrl") keys-sent :test #'equal))
-       (should-not (cl-find '("u" . "ctrl") keys-sent :test #'equal))))))
+      (evil-ghostel-test--with-echo-send keys-sent
+        (evil-ghostel-delete (line-beginning-position) (line-end-position)
+                             'line nil nil))
+      ;; 5 backspaces — one per char of "hello".
+      (should (= 5 (cl-count "backspace" keys-sent :test #'equal)))
+      ;; No readline shortcuts.
+      (should-not (member "e" keys-sent))
+      (should-not (member "u" keys-sent))))))
 
 (ert-deftest evil-ghostel-test-change-line-same-row-uses-backspaces ()
   "`cc' on the cursor's own line routes through `delete-input-region'
@@ -1376,19 +1368,16 @@ then enters insert state.  Same vterm-style shape as `dd'."
    (cl-letf (((symbol-function 'ghostel--alt-screen-p) (lambda (&rest _) nil)))
      (evil-normal-state)
      (let ((keys-sent '()))
-       (cl-letf (((symbol-function 'ghostel--send-encoded)
-                  (lambda (key mods &rest _)
-                    (push (cons key mods) keys-sent)))
-                 ((symbol-function 'evil-ghostel--sync-render) #'ignore)
-                 ((symbol-function 'evil-ghostel--insert-state-entry) #'ignore))
-         (evil-ghostel-change (line-beginning-position) (line-end-position)
-                              'line nil nil))
-       (should (= 5 (cl-count '("backspace" . "") keys-sent :test #'equal)))
-       (should-not (cl-find '("e" . "ctrl") keys-sent :test #'equal))
-       (should-not (cl-find '("u" . "ctrl") keys-sent :test #'equal))
-       ;; Point lands at input-start (pos 3, just after "$ ").
-       (should (= 3 (point)))
-       (should (eq evil-state 'insert))))))
+      (cl-letf (((symbol-function 'evil-ghostel--insert-state-entry) #'ignore))
+        (evil-ghostel-test--with-echo-send keys-sent
+          (evil-ghostel-change (line-beginning-position) (line-end-position)
+                               'line nil nil)))
+      (should (= 5 (cl-count "backspace" keys-sent :test #'equal)))
+      (should-not (member "e" keys-sent))
+      (should-not (member "u" keys-sent))
+      ;; Point lands at input-start (pos 3, just after "$ ").
+      (should (= 3 (point)))
+      (should (eq evil-state 'insert))))))
 
 (ert-deftest evil-ghostel-test-delete-line-multiline-syncs-cursor ()
   "Regression for #218: line-type delete syncs terminal cursor first.
@@ -1400,24 +1389,23 @@ line)."
   (evil-ghostel-test--with-evil-buffer
    (setq-local ghostel--term t)
    (insert "line one\nline two\nline three")
-   ;; Terminal cursor reported at end of line three (col 10, row 2)
+   ;; Terminal cursor reported at end of line three (col 10, row 2, pos 29).
    (cl-letf (((symbol-function 'ghostel--alt-screen-p) (lambda (&rest _) nil))
-             (ghostel--cursor-pos '(10 . 2)))
+             (ghostel--cursor-pos '(10 . 2))
+             (ghostel--cursor-char-pos 29))
      (evil-normal-state)
      (goto-char (point-min))
      (let ((keys-sent '()))
-       (cl-letf (((symbol-function 'ghostel--send-encoded)
-                  (lambda (key mods &rest _)
-                    (push (cons key mods) keys-sent))))
-         ;; Line 1 spans positions 1..10 ("line one" + newline = 9 chars)
-         (evil-ghostel-delete 1 10 'line nil nil))
-       ;; Sync from row 2 to row 1 (end of deleted region = bol of line 2)
-       (should (= 1 (cl-count '("up" . "") keys-sent :test #'equal)))
-       ;; Sync from col 10 to col 0
-       (should (= 10 (cl-count '("left" . "") keys-sent :test #'equal)))
-       ;; "line one\n" = 9 chars deleted via backspace
-       (should (= 9 (cl-count '("backspace" . "") keys-sent :test #'equal)))
-       (should-not (cl-find '("u" . "ctrl") keys-sent :test #'equal))))))
+      (evil-ghostel-test--with-echo-send keys-sent
+        ;; Line 1 spans positions 1..10 ("line one" + newline = 9 chars)
+        (evil-ghostel-delete 1 10 'line nil nil))
+      ;; Sync from row 2 to row 1 (end of deleted region = bol of line 2)
+      (should (= 1 (cl-count "up" keys-sent :test #'equal)))
+      ;; Sync from col 10 to col 0
+      (should (= 10 (cl-count "left" keys-sent :test #'equal)))
+      ;; "line one\n" = 9 chars deleted via backspace
+      (should (= 9 (cl-count "backspace" keys-sent :test #'equal)))
+      (should-not (member "u" keys-sent))))))
 
 (ert-deftest evil-ghostel-test-delete-char ()
   "`evil-ghostel-delete-char' (x) routes through PTY and stays in normal."
@@ -1444,16 +1432,13 @@ line)."
    (insert "hello world")
    (goto-char (point-min))
    (cl-letf (((symbol-function 'ghostel--alt-screen-p) (lambda (&rest _) nil))
-             (ghostel--cursor-pos '(0 . 0))
-             ((symbol-function 'evil-ghostel-goto-input-position) #'ignore))
+             (ghostel--cursor-pos '(11 . 0))
+             (ghostel--cursor-char-pos 12))  ; end of "hello world"
      (evil-normal-state)
-     (let ((bs-count 0))
-       (cl-letf (((symbol-function 'ghostel--send-encoded)
-                  (lambda (key _mods &rest _)
-                    (when (equal key "backspace")
-                      (cl-incf bs-count)))))
+     (let ((keys-sent '()))
+       (evil-ghostel-test--with-echo-send keys-sent
          (evil-ghostel-change 1 6 'inclusive nil nil))
-       (should (= 5 bs-count))
+       (should (= 5 (cl-count "backspace" keys-sent :test #'equal)))
        (should (eq evil-state 'insert))))))
 
 (ert-deftest evil-ghostel-test-change-whole-line ()
@@ -1480,24 +1465,16 @@ line)."
    (insert "hello")
    (goto-char (point-min))
    (cl-letf (((symbol-function 'ghostel--alt-screen-p) (lambda (&rest _) nil))
-             (ghostel--cursor-pos '(0 . 0))
-             ((symbol-function 'evil-ghostel-goto-input-position) #'ignore))
+             (ghostel--cursor-pos '(5 . 0))
+             (ghostel--cursor-char-pos 6))  ; end of "hello"
      (evil-normal-state)
-     (let ((bs-count 0)
-           (pasted nil))
-       (cl-letf (((symbol-function 'ghostel--send-encoded)
-                  (lambda (key _mods &rest _)
-                    (when (equal key "backspace")
-                      (cl-incf bs-count))))
-                 ((symbol-function 'ghostel--paste-text)
-                  (lambda (text) (setq pasted text))))
-         (evil-ghostel-replace 1 4 'inclusive ?X))
-       (should (= 3 bs-count))
+     (let ((keys-sent '()) (pasted nil))
+       (evil-ghostel-test--with-echo-send keys-sent
+         (cl-letf (((symbol-function 'ghostel--paste-text)
+                    (lambda (text) (setq pasted text))))
+           (evil-ghostel-replace 1 4 'inclusive ?X)))
+       (should (= 3 (cl-count "backspace" keys-sent :test #'equal)))
        (should (equal "XXX" pasted))))))
-
-;; -----------------------------------------------------------------------
-;; Test: evil-paste advice
-;; -----------------------------------------------------------------------
 
 (ert-deftest evil-ghostel-test-paste-after ()
   "`evil-ghostel-paste-after' pastes the kill ring's head via PTY."
@@ -1610,17 +1587,16 @@ Prevents up/down arrows being sent as history navigation."
   (evil-ghostel-test--with-evil-buffer
    (setq-local ghostel--term t)
    (insert "hello world")
-   ;; Terminal cursor on row 0, col 0
+   ;; Terminal cursor on row 0, col 0 (buffer pos 1).
    (cl-letf (((symbol-function 'ghostel--alt-screen-p) (lambda (&rest _) nil))
-             (ghostel--cursor-pos '(0 . 0)))
+             (ghostel--cursor-pos '(0 . 0))
+             (ghostel--cursor-char-pos 1))
      (evil-normal-state)
      ;; Move point to col 5 on the same row
      (goto-char (point-min))
      (move-to-column 5)
      (let ((keys-sent '()))
-       (cl-letf (((symbol-function 'ghostel--send-encoded)
-                  (lambda (key _mods &rest _)
-                    (push key keys-sent))))
+       (evil-ghostel-test--with-echo-send keys-sent
          (evil-insert-state))
        ;; Should have sent right arrows to sync column
        (should (member "right" keys-sent))
@@ -2010,14 +1986,13 @@ Trailing whitespace in single-line ranges is real user content."
    (goto-char (point-min))
    (move-to-column 5)  ; start of word2
    (cl-letf (((symbol-function 'ghostel--alt-screen-p) (lambda (&rest _) nil))
-             (ghostel--cursor-pos '(14 . 0)))
-     (let ((bs-count 0))
-       (cl-letf (((symbol-function 'ghostel--send-encoded)
-                  (lambda (key _mods &rest _)
-                    (when (equal key "backspace") (cl-incf bs-count)))))
+             (ghostel--cursor-pos '(14 . 0))
+             (ghostel--cursor-char-pos 15))
+     (let ((keys-sent '()))
+       (evil-ghostel-test--with-echo-send keys-sent
          ;; `dw' from col 5 deletes "word " (chars 6..10, exclusive end 11).
          (evil-ghostel-delete 6 11 'exclusive nil nil))
-       (should (= 5 bs-count))))))
+       (should (= 5 (cl-count "backspace" keys-sent :test #'equal)))))))
 
 (ert-deftest evil-ghostel-test-delete-word-on-last-word-clamps-overshoot ()
   "Regression: `dw' on the last input word clamps motion overshoot.
@@ -2040,16 +2015,14 @@ padding/blanks past end-of-input."
              (ghostel--cursor-pos '(7 . 0))
              (ghostel--cursor-char-pos 8))
      (evil-normal-state)
-     (let ((bs-count 0))
-       (cl-letf (((symbol-function 'ghostel--send-encoded)
-                  (lambda (key _mods &rest _)
-                    (when (equal key "backspace") (cl-incf bs-count)))))
+     (let ((keys-sent '()))
+       (evil-ghostel-test--with-echo-send keys-sent
          ;; Motion `w' from pos 8 walks past end-of-input to a blank
          ;; row below — simulate by passing END beyond the cursor row.
          (evil-ghostel-delete 8 13 'exclusive nil nil))
        ;; Clamp trims END to row-end (pos 12, after "word"), so the
        ;; delete sends 4 backspaces for "word", not 5+ for "word\n..."
-       (should (= 4 bs-count))))))
+       (should (= 4 (cl-count "backspace" keys-sent :test #'equal)))))))
 
 (ert-deftest evil-ghostel-test-change-partial-no-post-delete-sync ()
   "After `cw' (count > 0) the post-delete `evil-ghostel-insert' is idempotent.
@@ -2065,30 +2038,9 @@ mirror that drain behaviour."
    (move-to-column 6)
    (setq ghostel--cursor-pos '(17 . 0))
    (setq ghostel--cursor-char-pos (+ (point-min) 17))
-   (cl-letf (((symbol-function 'ghostel--alt-screen-p) (lambda (&rest _) nil))
-             ((symbol-function 'evil-ghostel--sync-render)
-              (lambda (&rest _) nil))) ; we already update pos inline
+   (cl-letf (((symbol-function 'ghostel--alt-screen-p) (lambda (&rest _) nil)))
      (let ((keys-sent '()))
-       (cl-letf (((symbol-function 'ghostel--send-encoded)
-                  (lambda (key _mods &rest _)
-                    (push key keys-sent)
-                    ;; Simulate the shell echo updating cursor-pos.
-                    (pcase key
-                      ((or "left" "backspace")
-                       (let ((col (car ghostel--cursor-pos))
-                             (row (cdr ghostel--cursor-pos)))
-                         (setq ghostel--cursor-pos (cons (max 0 (1- col)) row))
-                         (when ghostel--cursor-char-pos
-                           (setq ghostel--cursor-char-pos
-                                 (max (point-min)
-                                      (1- ghostel--cursor-char-pos))))))
-                      ("right"
-                       (let ((col (car ghostel--cursor-pos))
-                             (row (cdr ghostel--cursor-pos)))
-                         (setq ghostel--cursor-pos (cons (1+ col) row))
-                         (when ghostel--cursor-char-pos
-                           (setq ghostel--cursor-char-pos
-                                 (1+ ghostel--cursor-char-pos)))))))))
+       (evil-ghostel-test--with-echo-send keys-sent
          (evil-ghostel-change 7 12 'exclusive nil nil))
        (let* ((seq (nreverse keys-sent))
               (left-count (cl-count "left" seq :test #'equal))
@@ -2600,16 +2552,15 @@ character, so it must not consume a backspace or a replacement char."
    (cl-letf (((symbol-function 'ghostel--alt-screen-p) (lambda (&rest _) nil))
              (ghostel--cursor-pos '(1 . 0))
              (ghostel--cursor-char-pos (point-max))
-             ((symbol-function 'evil-ghostel-goto-input-position) #'ignore))
+             ((symbol-function 'evil-ghostel-goto-input-position)
+              (lambda (&rest _) t)))
      (evil-normal-state)
-     (let ((bs-count 0) (pasted nil))
-       (cl-letf (((symbol-function 'ghostel--send-encoded)
-                  (lambda (key _mods &rest _)
-                    (when (equal key "backspace") (cl-incf bs-count))))
-                 ((symbol-function 'ghostel--paste-text)
-                  (lambda (text) (setq pasted text))))
-         (evil-ghostel-replace (point-min) (point-max) 'inclusive ?X))
-       (should (= 3 bs-count))
+     (let ((keys-sent '()) (pasted nil))
+       (evil-ghostel-test--with-echo-send keys-sent
+         (cl-letf (((symbol-function 'ghostel--paste-text)
+                    (lambda (text) (setq pasted text))))
+           (evil-ghostel-replace (point-min) (point-max) 'inclusive ?X)))
+       (should (= 3 (cl-count "backspace" keys-sent :test #'equal)))
        (should (equal "XXX" pasted))))))
 
 (ert-deftest evil-ghostel-test-change-registered-for-cw-to-ce ()
