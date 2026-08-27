@@ -162,6 +162,12 @@ If you're an evil user you can install the [evil-ghostel](https://melpa.org/#/ev
   :hook (ghostel-mode . evil-ghostel-mode))
 ```
 
+With evil-ghostel active, `C-c C-t` enters frozen copy mode in normal state.
+Vim navigation keys therefore stay in the frozen buffer; `C-c C-t` toggles
+copy mode off again, and entering insert state returns to the terminal.
+Printable keys do not trigger Ghostel's read-only fast-exit behavior in
+evil-ghostel buffers.
+
 Note: in alt-screen apps — vim, less, fullscreen TUIs like Claude Code
 (`/tui fullscreen`) — ESC is by default sent to the app instead of switching
 to normal state, so you stay in insert state and a leader key like `SPC` goes
