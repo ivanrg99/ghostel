@@ -1563,7 +1563,7 @@ When =evil-ghostel-mode= is active:
     "0" #'evil-ghostel-first-non-blank)
   #+end_src
 - *Insert/append* (=i=, =a=, =I=, =A=) sync the terminal cursor to point before entering
-  insert state.
+  insert state, including around wide characters, grapheme clusters, and soft wraps.
 - In normal state, prompt jumps (=[[=, =]]=), search, and minibuffer jumps
   stay in semi-char mode.  Entering insert state from copy or Emacs mode
   returns to the terminal; entering copy or Emacs mode from insert state
@@ -1590,6 +1590,10 @@ When =evil-ghostel-mode= is active:
 
 The initial state is configurable via =evil-ghostel-initial-state= (default
 =insert=).
+
+Cursor-driven commands follow the position reported by the terminal after
+each key and stop if the shell ignores it.  Delayed shell echoes are allowed
+up to =evil-ghostel-cursor-feedback-timeout= seconds (default 0.5).
 
 *** ESC routing
 :properties:

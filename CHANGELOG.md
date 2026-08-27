@@ -24,6 +24,12 @@ All notable changes to this project will be documented in this file.
   Emacs in live terminal-input modes.  A foreign deletion of rendered
   text is repaired by one full redraw after the command ends, and
   insertions made while that repair is pending are dropped with it.
+- Editing the live prompt with evil-ghostel no longer leaves characters behind
+  or desynchronizes point around wide characters, grapheme clusters, and soft
+  wraps.  Cursor moves and deletions now follow the position reported by the
+  terminal and stop if a key is ignored.  The new
+  `evil-ghostel-cursor-feedback-timeout` allows slow shell echoes without
+  coupling correctness to redraw scheduling.
 
 ## [0.57.0] — 2026-10-09
 
