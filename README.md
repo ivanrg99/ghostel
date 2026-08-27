@@ -161,6 +161,12 @@ Word motions and text objects use Vim-style boundaries, so paths split at
 punctuation. Set `evil-ghostel-word-boundaries` to `nil` to retain Ghostel's
 path-aware boundaries.
 
+With evil-ghostel active, `C-c C-t` enters frozen copy mode in normal state.
+Vim navigation keys therefore stay in the frozen buffer; `C-c C-t` toggles
+copy mode off again. Printable keys do not trigger Ghostel's read-only
+fast-exit behavior in evil-ghostel buffers. If you enter insert state in a
+read-only mode, `ESC` returns to normal state without exiting that mode.
+
 Note: in alt-screen apps — vim, less, fullscreen TUIs like Claude Code
 (`/tui fullscreen`) — ESC is by default sent to the app instead of switching
 to normal state, so you stay in insert state and a leader key like `SPC` goes

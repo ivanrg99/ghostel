@@ -20,6 +20,12 @@ All notable changes to this project will be documented in this file.
   `evil-ghostel-sync-render-max-iterations`.  Incremental redraws skip clean
   rows above the first changed row, reducing the cost of the per-key feedback
   loop.
+- `evil-ghostel`: `C-c C-t` now enters copy mode in Evil normal state and
+  printable Vim navigation keys no longer trigger Ghostel's read-only fast
+  exit.  Copy mode stays frozen until `C-c C-t` or another explicit
+  input-mode switch exits it; accidentally entering insert state remains
+  recoverable with `ESC`, including on legacy TTY frames and over an
+  alt-screen terminal.
 - Directory tracking no longer corrupts or silently stalls on paths
   containing `#` or percent-escapes.  The bash and zsh integrations
   report the cwd with kitty's `kitty-shell-cwd://` OSC 7 scheme (path
