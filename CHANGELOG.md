@@ -17,7 +17,9 @@ All notable changes to this project will be documented in this file.
   wraps.  Cursor moves and deletions now follow the position reported by the
   terminal and stop if a key is ignored.  The new
   `evil-ghostel-max-arrow-iterations` safety limit replaces
-  `evil-ghostel-sync-render-max-iterations`.
+  `evil-ghostel-sync-render-max-iterations`.  Incremental redraws skip clean
+  rows above the first changed row, reducing the cost of the per-key feedback
+  loop.
 - Directory tracking no longer corrupts or silently stalls on paths
   containing `#` or percent-escapes.  The bash and zsh integrations
   report the cwd with kitty's `kitty-shell-cwd://` OSC 7 scheme (path
