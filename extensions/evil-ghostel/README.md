@@ -18,6 +18,25 @@ terminal, and the editing operators (`d`, `c`, `x`, `r`, `p`, `u`, …) drive
 the shell's line editor over the PTY. See the
 [manual](https://dakra.github.io/ghostel/#evil-mode) for the full list.
 
+Cursor-driven commands follow the position reported by the terminal after
+each key, keeping edits aligned around wide characters, grapheme clusters,
+and soft wraps and stopping if the shell ignores a key.
+
+## Word boundaries
+
+Word motions and text objects use Vim-style boundaries, so paths and hostnames
+split at punctuation. This also applies to word-based Avy commands and
+double-click selection; link activation is unaffected.
+
+To retain Ghostel's path-aware boundaries, where a path or hostname is one
+word, set the option before enabling the mode:
+
+```emacs-lisp
+(setq evil-ghostel-word-boundaries nil)
+```
+
+Toggle `evil-ghostel-mode` after changing the option in an existing buffer.
+
 ## ESC in fullscreen apps
 
 In alt-screen apps — vim, less, and fullscreen TUIs like Claude Code

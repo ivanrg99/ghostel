@@ -157,6 +157,10 @@ If you're an evil user you can install the [evil-ghostel](https://melpa.org/#/ev
   :hook (ghostel-mode . evil-ghostel-mode))
 ```
 
+Word motions and text objects use Vim-style boundaries, so paths split at
+punctuation. Set `evil-ghostel-word-boundaries` to `nil` to retain Ghostel's
+path-aware boundaries.
+
 Note: in alt-screen apps — vim, less, fullscreen TUIs like Claude Code
 (`/tui fullscreen`) — ESC is by default sent to the app instead of switching
 to normal state, so you stay in insert state and a leader key like `SPC` goes

@@ -20,9 +20,11 @@
 ;; the commands that drive the shell's line editor are customized:
 ;; operators (d c x s r and line variants) clamp their range to
 ;; [input-start, input-end] and apply it over the PTY (arrows, backspaces,
-;; bracketed paste); i a I A drive the shell cursor to point; ^ jumps past
-;; the prompt; j / G stay on the live prompt; p / P paste; u sends
-;; readline undo.
+;; bracketed paste), following renderer feedback after each key; i a I A
+;; drive the shell cursor to point; ^ jumps past the prompt; j / G stay on
+;; the live prompt; p / P paste; u sends readline undo.  Word motions and
+;; text objects use Vim-style boundaries by default; customize
+;; `evil-ghostel-word-boundaries' to retain Ghostel's path-aware boundaries.
 ;;
 ;; Outside semi-char input mode (`line' / `copy' / `emacs' / `char' modes,
 ;; or an alt-screen TUI) every command falls through to `evil-*'.

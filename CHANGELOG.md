@@ -4,7 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Word motions and text objects in evil-ghostel now use Vim-style boundaries,
+  so paths and hostnames split at punctuation.  This also applies to
+  word-based Avy commands and double-click selection; set
+  `evil-ghostel-word-boundaries` to nil to keep Ghostel's path-aware
+  boundaries.
+
 ### Fixed
+- Editing the live prompt with evil-ghostel no longer leaves characters behind
+  or desynchronizes point around wide characters, grapheme clusters, and soft
+  wraps.  Cursor moves and deletions now follow the position reported by the
+  terminal and stop if a key is ignored.  The new
+  `evil-ghostel-max-arrow-iterations` safety limit replaces
+  `evil-ghostel-sync-render-max-iterations`.
 - Directory tracking no longer corrupts or silently stalls on paths
   containing `#` or percent-escapes.  The bash and zsh integrations
   report the cwd with kitty's `kitty-shell-cwd://` OSC 7 scheme (path
