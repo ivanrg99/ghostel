@@ -33,7 +33,8 @@ All notable changes to this project will be documented in this file.
   rows above the first changed row, reducing the cost of the per-key feedback
   loop.  Pending synchronized-output redraws are forced while waiting for
   cursor feedback, so `i` and `I` enter insert state at the requested position
-  instead of snapping back to the end of the input.
+  instead of snapping back to the end of the input, including when the input
+  spans multiple soft-wrapped terminal rows.
 - `evil-ghostel`: printable Vim navigation keys no longer trigger Ghostel's
   read-only fast exit.  Copy mode stays frozen until `C-c C-t`, another
   explicit input-mode switch, or entering insert state exits it.
