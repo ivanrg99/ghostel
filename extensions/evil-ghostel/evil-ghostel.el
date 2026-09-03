@@ -198,6 +198,54 @@ Comparable to `ghostel--cursor-pos''s row."
   (when ghostel--term-rows
     (- (line-number-at-pos (point) t) 1 (evil-ghostel--scrollback-lines))))
 
+(defun evil-ghostel--same-logical-line-p (pos)
+  "Return non-nil when POS and the terminal cursor share a logical line.
+Renderer newlines carrying `ghostel-wrap' join adjacent rows of one terminal
+line.  Any ordinary newline separates shell input from scrollback or a real
+multiline input row, where sending Up or Down could navigate shell history."
+  (when-let* ((cursor (evil-ghostel--cursor-char-pos))
+              ((>= pos (point-min)))
+              ((<= pos (point-max))))
+    (save-excursion
+      (goto-char (min pos cursor))
+      (let ((end (max pos cursor))
+            (same t))
+        (while (and same (search-forward "\n" end t))
+          (unless (get-text-property (1- (point)) 'ghostel-wrap)
+            (setq same nil)))
+        same))))
+
+(defun evil-ghostel--logical-input-start ()
+  "Return the prompt boundary across the cursor's soft-wrapped logical line.
+Falls back to `ghostel-input-start-point' when no earlier wrapped row exists."
+  (when-let* ((cursor (evil-ghostel--cursor-char-pos)))
+    (let ((logical-start
+           (save-excursion
+             (goto-char cursor)
+             (beginning-of-line)
+             (while (and (> (point) (point-min))
+                         (get-text-property (1- (point)) 'ghostel-wrap))
+               (forward-line -1))
+             (point))))
+      (if (= logical-start (save-excursion
+                             (goto-char cursor)
+                             (line-beginning-position)))
+          (ghostel-input-start-point)
+        (let ((scan logical-start)
+              prompt-end)
+          (while (< scan cursor)
+            (if-let* ((prompt (text-property-any
+                               scan cursor 'ghostel-prompt t)))
+                (setq prompt-end
+                      (or (next-single-property-change
+                           prompt 'ghostel-prompt nil cursor)
+                          cursor)
+                      scan prompt-end)
+              (setq scan cursor)))
+          (or prompt-end
+              (ghostel--regex-prompt-end logical-start)
+              cursor))))))
+
 (defun evil-ghostel--following-window-p ()
   "Return non-nil when the buffer's window follows the live output.
 No window showing the buffer counts as following."
@@ -296,13 +344,14 @@ ORIG-FN is the advised setter (STYLE, VISIBLE); deferred to in alt-screen."
 
 (defun evil-ghostel--insert-state-entry ()
   "Drive the terminal cursor to point on insert/emacs entry (safety net).
-On a different row, snap point back to the cursor instead — up/down arrows
-would be read as shell history navigation."
+Across a soft wrap, move with Left or Right.  On a different logical line,
+snap point back instead because Up or Down could navigate shell history."
   (when (and (derived-mode-p 'ghostel-mode)
              (evil-ghostel--prompt-active-p))
     (let ((trow (cdr ghostel--cursor-pos))
           (erow (or (evil-ghostel--point-viewport-row) 0)))
-      (if (= erow trow)
+      (if (or (= erow trow)
+              (evil-ghostel--same-logical-line-p (point)))
           (evil-ghostel-goto-input-position (point))
         (evil-ghostel--reset-cursor-point)))))
 
@@ -382,7 +431,7 @@ padding; a trailing autosuggestion is excluded (boundary at the cursor)."
 Unlike `ghostel-input-start-point', returns nil (not the cursor) when no
 prompt is recognized, so an operator's BEG stays unclamped rather than
 collapsing the range — vterm's behaviour for shells without prompt tracking."
-  (let ((s (ghostel-input-start-point)))
+  (let ((s (evil-ghostel--logical-input-start)))
     (and s ghostel--cursor-char-pos (< s ghostel--cursor-char-pos) s)))
 
 (defun evil-ghostel--clamp (beg end)
@@ -621,7 +670,7 @@ $ would walk into non-typed cells).  Off the cursor row, unchanged."
   (cond
    ((not (evil-ghostel--prompt-active-p))
     (call-interactively #'evil-insert))
-   ((not (ghostel-point-on-cursor-row-p))
+   ((not (evil-ghostel--same-logical-line-p (point)))
     (when-let* ((target (ghostel-input-start-point)))
       (evil-ghostel-goto-input-position target))
     (evil-insert-state 1))
@@ -636,7 +685,7 @@ $ would walk into non-typed cells).  Off the cursor row, unchanged."
   (interactive)
   (cond
    ((evil-ghostel--prompt-active-p)
-    (when-let* ((target (ghostel-input-start-point)))
+    (when-let* ((target (evil-ghostel--logical-input-start)))
       (evil-ghostel-goto-input-position target))
     (evil-insert-state 1))
    ((evil-ghostel--line-mode-active-p)
@@ -650,7 +699,7 @@ $ would walk into non-typed cells).  Off the cursor row, unchanged."
   (cond
    ((not (evil-ghostel--prompt-active-p))
     (call-interactively #'evil-append))
-   ((not (ghostel-point-on-cursor-row-p))
+   ((not (evil-ghostel--same-logical-line-p (point)))
     (when-let* ((target (ghostel-input-start-point)))
       (evil-ghostel-goto-input-position target))
     (evil-insert-state 1))

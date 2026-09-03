@@ -1331,6 +1331,35 @@ cursor at the end of input."
         (should (= target ghostel--cursor-char-pos))
         (should (= target (point)))))))
 
+(ert-deftest evil-ghostel-test-insert-commands-cross-soft-wrap ()
+  "The `i' and `I' commands position within a soft-wrapped input line."
+  (dolist (spec '((evil-ghostel-insert . 4)
+                  (evil-ghostel-insert-line . 3)))
+    (evil-ghostel-test--with-evil-buffer
+      (setq-local ghostel--term t
+                  ghostel--term-rows 3)
+      (insert (propertize "$ " 'ghostel-prompt t))
+      (insert "ab")
+      (insert (propertize "\n" 'ghostel-wrap t))
+      (insert "cd")
+      (insert (propertize "\n" 'ghostel-wrap t))
+      (insert "ef")
+      (setq ghostel--cursor-char-pos (point-max)
+            ghostel--cursor-pos '(2 . 2))
+      (cl-letf (((symbol-function 'ghostel--alt-screen-p)
+                 (lambda (&rest _) nil)))
+        (evil-normal-state)
+        ;; Point is on the first rendered row while the terminal cursor is
+        ;; at the end of the same logical input on the row below.
+        (goto-char 4)
+        (let ((keys-sent nil))
+          (evil-ghostel-test--with-echo-send keys-sent
+            (funcall (car spec)))
+          (should (member "left" keys-sent)))
+        (should (evil-insert-state-p))
+        (should (= (cdr spec) ghostel--cursor-char-pos))
+        (should (= (cdr spec) (point)))))))
+
 (ert-deftest evil-ghostel-test-goto-input-position-stops-on-reverse-motion ()
   "A cursor key moving away from the target stops after one attempt."
   (evil-ghostel-test--with-evil-buffer
