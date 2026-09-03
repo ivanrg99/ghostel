@@ -1294,6 +1294,43 @@ arrows are sent."
       (should (equal '("left") keys-sent))
       (should (>= waited 0.1)))))
 
+(ert-deftest evil-ghostel-test-insert-commands-force-pending-cursor-feedback ()
+  "The `i' and `I' commands force pending redraws to publish cursor moves.
+During synchronized output, processing a shell's Left-arrow echo can leave
+`ghostel--pending-redraw' set without a redraw timer.  The cursor wait must
+force that redraw or the insert-state entry hook resets point to the stale
+cursor at the end of input."
+  (dolist (spec '((evil-ghostel-insert . 5)
+                  (evil-ghostel-insert-line . 3)))
+    (evil-ghostel-test--with-input-fixture "$ " "abc"
+      (evil-normal-state)
+      (let ((target (cdr spec))
+            (clock 0.0)
+            (forced nil))
+        ;; For `i', this is the requested insertion point.  `I' replaces it
+        ;; with the prompt boundary, which is TARGET in its case too.
+        (goto-char target)
+        (let ((evil-ghostel-cursor-feedback-timeout 1.0))
+          (cl-letf (((symbol-function 'ghostel--send-encoded) #'ignore)
+                    ((symbol-function 'float-time)
+                     (lambda (&rest _)
+                       (cl-incf clock 0.4)))
+                    ((symbol-function 'accept-process-output)
+                     (lambda (&rest _)
+                       (setq ghostel--pending-redraw t)))
+                    ((symbol-function 'ghostel--redraw-now)
+                     (lambda (_buffer &optional force)
+                       (setq forced force
+                             ghostel--pending-redraw nil)
+                       (when force
+                         (cl-decf ghostel--cursor-char-pos)
+                         (cl-decf (car ghostel--cursor-pos))))))
+            (funcall (car spec))))
+        (should forced)
+        (should (evil-insert-state-p))
+        (should (= target ghostel--cursor-char-pos))
+        (should (= target (point)))))))
+
 (ert-deftest evil-ghostel-test-goto-input-position-stops-on-reverse-motion ()
   "A cursor key moving away from the target stops after one attempt."
   (evil-ghostel-test--with-evil-buffer

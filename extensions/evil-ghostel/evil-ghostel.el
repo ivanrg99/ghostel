@@ -427,8 +427,8 @@ comparison uses renderer feedback rather than timer state."
                   (< (float-time) deadline))
         (accept-process-output ghostel--process
                                (- deadline (float-time)) nil t)
-        (when ghostel--redraw-timer
-          (ghostel--redraw-now (current-buffer)))))))
+        (when (or ghostel--pending-redraw ghostel--redraw-timer)
+          (ghostel--redraw-now (current-buffer) t))))))
 
 (defun evil-ghostel--cursor-direction (current target target-row)
   "Return the safe cursor key direction from CURRENT toward TARGET.
